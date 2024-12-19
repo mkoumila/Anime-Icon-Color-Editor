@@ -31,19 +31,43 @@ async function handleFileSelect(event) {
             const isSvg = file.name.toLowerCase().endsWith('.svg');
             
             try {
-                data = isSvg ? content : JSON.parse(content);
+                if (!isSvg) {
+                    // Parse JSON content
+                    data = JSON.parse(content);
+                    
+                    // Check if this is our custom JSON format containing SVG
+                    if (data.type === 'svg' && data.content) {
+                        // Handle as SVG
+                        animations.set(file.name, {
+                            original: data.content,
+                            modified: data.content,
+                            colors: data.metadata?.colors || extractColors(data.content),
+                            type: 'svg'
+                        });
+                    } else {
+                        // Handle as regular JSON/Lottie
+                        animations.set(file.name, {
+                            original: data,
+                            modified: JSON.parse(JSON.stringify(data)),
+                            colors: extractColors(data),
+                            type: 'json'
+                        });
+                    }
+                } else {
+                    // Handle regular SVG file
+                    data = content;
+                    animations.set(file.name, {
+                        original: data,
+                        modified: data,
+                        colors: extractColors(data),
+                        type: 'svg'
+                    });
+                }
             } catch (e) {
                 console.error(`Error parsing ${file.name}:`, e);
                 alert(`Error parsing ${file.name}. Make sure it's a valid ${isSvg ? 'SVG' : 'JSON'} file.`);
                 continue;
             }
-            
-            animations.set(file.name, {
-                original: data,
-                modified: isSvg ? content : JSON.parse(content),
-                colors: extractColors(data),
-                type: isSvg ? 'svg' : 'json'
-            });
 
             // Create file item with modern styling
             const fileItem = document.createElement('div');
@@ -177,6 +201,10 @@ async function handleFileSelect(event) {
             
             // Initialize Lucide icons for the new elements
             lucide.createIcons();
+
+            // After successfully adding a file
+            saveToLocalStorage(); // Save after each file is added
+
         } catch (error) {
             console.error(`Error processing ${file.name}:`, error);
             alert(`Error processing ${file.name}. Please try again.`);
@@ -641,123 +669,60 @@ function createPreviewContainer(title, bgColor) {
     return container;
 }
 
-function updateColor(fileName, currentColor, newColor) {
+function updateColor(fileName, oldColor, newColor) {
     const animData = animations.get(fileName);
+    if (!animData) return false;
+
     let modified = false;
     
-    if (animData.type === 'svg') {
-        // Parse SVG
-        const parser = new DOMParser();
-        const svgDoc = parser.parseFromString(animData.modified, "image/svg+xml");
+    // Convert Set to Array for indexOf operation
+    const colorsArray = Array.from(animData.colors);
+    const colorIndex = colorsArray.indexOf(oldColor);
+    
+    if (colorIndex !== -1) {
+        // Update the color in the Set
+        animData.colors.delete(oldColor);
+        animData.colors.add(newColor);
         
-        // Function to update colors in style attribute
-        function updateStyleColors(style) {
-            if (!style) return style;
-            return style
-                .replace(new RegExp(currentColor, 'gi'), newColor)
-                .replace(new RegExp(`fill:\\s*${currentColor}`, 'gi'), `fill: ${newColor}`)
-                .replace(new RegExp(`stroke:\\s*${currentColor}`, 'gi'), `stroke: ${newColor}`);
-        }
-
-        // Update all elements
-        svgDoc.querySelectorAll('*').forEach(element => {
-            // Update fill attribute
-            if (element.getAttribute('fill') === currentColor) {
-                element.setAttribute('fill', newColor);
-                modified = true;
-            }
-            
-            // Update stroke attribute
-            if (element.getAttribute('stroke') === currentColor) {
-                element.setAttribute('stroke', newColor);
-                modified = true;
-            }
-            
-            // Update style attribute
-            const style = element.getAttribute('style');
-            if (style) {
-                const newStyle = updateStyleColors(style);
-                if (newStyle !== style) {
-                    element.setAttribute('style', newStyle);
-                    modified = true;
-                }
-            }
-        });
-
-        if (modified) {
-            // Update the modified SVG content
-            animData.modified = new XMLSerializer().serializeToString(svgDoc);
-        }
-    } else {
-        // Update colors in JSON
-        const oldColor = hexToRgba(currentColor);
-        const newColorRgba = hexToRgba(newColor);
-        
-        function updateColors(obj) {
-            for (let key in obj) {
-                if (typeof obj[key] === 'object' && obj[key] !== null) {
-                    // Skip hidden layers
-                    if (obj.hd === true || obj.hidden === true) {
-                        continue;
-                    }
-
-                    if (Array.isArray(obj[key])) {
-                        // Handle color arrays
-                        if ((key === 'c' || key === 'k') && obj[key].length === 4) {
-                            const currentArray = obj[key];
-                            if (arraysAreClose(currentArray, oldColor)) {
-                                obj[key] = [...newColorRgba];
-                                modified = true;
-                            }
+        if (animData.type === 'svg') {
+            // Update SVG content
+            animData.modified = animData.modified.replace(
+                new RegExp(`"${oldColor}"`, 'g'),
+                `"${newColor}"`
+            ).replace(
+                new RegExp(`'${oldColor}'`, 'g'),
+                `'${newColor}'`
+            ).replace(
+                new RegExp(`${oldColor}(?=[ ;])`, 'g'),
+                newColor
+            );
+            modified = true;
+        } else {
+            // Update JSON/Lottie content
+            const updateColors = (obj) => {
+                if (Array.isArray(obj)) {
+                    obj.forEach(item => updateColors(item));
+                } else if (obj && typeof obj === 'object') {
+                    Object.entries(obj).forEach(([key, value]) => {
+                        if (typeof value === 'string' && value.toLowerCase() === oldColor.toLowerCase()) {
+                            obj[key] = newColor;
+                            modified = true;
+                        } else if (value && typeof value === 'object') {
+                            updateColors(value);
                         }
-                        // Handle fill/stroke colors
-                        else if ((key === 'fc' || key === 'sc') && obj[key].length >= 3) {
-                            const currentArray = [...obj[key], 1].slice(0, 4);
-                            if (arraysAreClose(currentArray, oldColor)) {
-                                obj[key] = newColorRgba.slice(0, obj[key].length);
-                                modified = true;
-                            }
-                        }
-                    }
-                    updateColors(obj[key]);
+                    });
                 }
-            }
+            };
+            
+            updateColors(animData.modified);
         }
         
-        updateColors(animData.modified);
-    }
-
-    if (modified) {
-        // Replace the old color with the new one in the colors array
-        const colorIndex = animData.colors.indexOf(currentColor);
-        if (colorIndex !== -1) {
-            // Replace the color instead of adding a new one
-            animData.colors[colorIndex] = newColor;
-        }
-
-        // Re-extract colors to ensure we have the correct set
-        // This helps prevent duplicate colors
-        const uniqueColors = new Set(extractColors(animData.modified));
-        animData.colors = Array.from(uniqueColors);
-
-        // Update the UI
-        loadAnimation(fileName);
-        
-        // Update global colors without creating new cards
-        const globalColorPicker = document.querySelector(`#globalColors [data-color="${currentColor}"]`);
-        if (globalColorPicker) {
-            globalColorPicker.dataset.color = newColor;
-            const preview = globalColorPicker.querySelector('.color-preview');
-            if (preview) {
-                preview.style.backgroundColor = newColor;
-            }
-            const colorText = globalColorPicker.querySelector('.color-text');
-            if (colorText) {
-                colorText.textContent = newColor.toUpperCase();
-            }
+        // Update preview if this is the current file
+        if (fileName === currentFileName) {
+            loadAnimation(fileName);
         }
     }
-
+    
     return modified;
 }
 
@@ -1173,46 +1138,13 @@ function svgToCanvas(svgElement) {
 }
 
 function deleteFile(fileName) {
-    // Remove from animations Map
-    animations.delete(fileName);
+    const fileItem = Array.from(document.querySelectorAll('.file-item'))
+        .find(item => item.querySelector('.text-sm').textContent === fileName);
     
-    // Remove from UI
-    const filesList = document.getElementById('filesList');
-    const fileItems = filesList.children;
-    for (let item of fileItems) {
-        if (item.querySelector('span').textContent === fileName) {
-            filesList.removeChild(item);
-            break;
-        }
-    }
-    
-    // Clear preview if the deleted file was selected
-    if (currentFileName === fileName) {
-        const colorControls = document.getElementById('colorControls');
-        colorControls.innerHTML = '';
-        
-        const container = document.getElementById('iconPreview');
-        container.innerHTML = '';
-        
-        if (currentAnimation) {
-            if (currentAnimation.light) currentAnimation.light.destroy();
-            if (currentAnimation.dark) currentAnimation.dark.destroy();
-            currentAnimation = null;
-        }
-        currentFileName = null;
-        
-        // Load the first remaining file if any
-        if (animations.size > 0) {
-            loadAnimation(animations.keys().next().value);
-        }
-    }
-    
-    // Remove export buttons if no files remain
-    if (animations.size === 0) {
-        const exportButtons = document.querySelector('.export-buttons');
-        if (exportButtons) {
-            exportButtons.remove();
-        }
+    if (fileItem) {
+        fileItem.remove();
+        animations.delete(fileName);
+        saveToLocalStorage(); // Save after deletion
     }
 }
 
@@ -1601,167 +1533,98 @@ function showExportDialog(type) {
     if (type === 'json') {
         exportBtn.onclick = async () => {
             const selectedFiles = Array.from(fileList.querySelectorAll('.file-checkbox:checked'))
-                .map(checkbox => {
-                    const fileItem = checkbox.closest('.space-y-3');
-                    return {
-                        fileName: checkbox.dataset.filename,
-                        width: parseInt(fileItem.querySelector('.file-width')?.value || 512),
-                        height: parseInt(fileItem.querySelector('.file-height')?.value || 512)
-                    };
-                });
+                .map(checkbox => checkbox.dataset.filename);
             
             if (selectedFiles.length === 0) {
                 alert('Please select at least one file to export');
                 return;
             }
 
-            // Get options based on export type
-            const options = type === 'svg' ? {
-                background: document.getElementById('svgBackground').value,
-                optimize: document.getElementById('svgOptimize').checked
-            } : {
-                format: document.getElementById('jsonFormat').value
-            };
-            
+            const format = document.getElementById('jsonFormat').value;
             document.body.removeChild(backdrop);
-            
+
             try {
                 const zip = new JSZip();
+                let hasFiles = false;
                 
-                for (const {fileName, width, height} of selectedFiles) {
+                for (const fileName of selectedFiles) {
                     const animData = animations.get(fileName);
-                    if (!animData) continue;
+                    if (!animData) {
+                        console.warn(`Animation data not found for ${fileName}`);
+                        continue;
+                    }
 
-                    if (type === 'svg') {
-                        if (animData.type === 'svg') {
-                            // For SVG files, use the modified content directly
-                            const parser = new DOMParser();
-                            const svgDoc = parser.parseFromString(animData.modified, 'image/svg+xml');
-                            const svg = svgDoc.querySelector('svg');
-                            
-                            // Get original viewBox or create one
-                            let viewBox = svg.getAttribute('viewBox');
-                            if (!viewBox) {
-                                const originalWidth = parseFloat(svg.getAttribute('width')) || 512;
-                                const originalHeight = parseFloat(svg.getAttribute('height')) || 512;
-                                viewBox = `0 0 ${originalWidth} ${originalHeight}`;
-                            }
-                            const [vbX, vbY, vbWidth, vbHeight] = viewBox.split(' ').map(Number);
-                            
-                            // Set new dimensions
-                            svg.setAttribute('width', width);
-                            svg.setAttribute('height', height);
-                            
-                            // Create wrapper group for scaling
-                            const wrapper = svgDoc.createElementNS('http://www.w3.org/2000/svg', 'g');
-                            
-                            // Calculate scale to maintain aspect ratio
-                            const scaleX = width / vbWidth;
-                            const scaleY = height / vbHeight;
-                            const scale = Math.min(scaleX, scaleY);
-                            const translateX = (width - (vbWidth * scale)) / 2;
-                            const translateY = (height - (vbHeight * scale)) / 2;
-                            
-                            // Set background if not transparent (before the wrapper)
-                            if (options.background !== 'transparent') {
-                                const rect = svgDoc.createElementNS('http://www.w3.org/2000/svg', 'rect');
-                                rect.setAttribute('width', width);
-                                rect.setAttribute('height', height);
-                                rect.setAttribute('fill', options.background);
-                                svg.appendChild(rect);
-                            }
-                            
-                            // Move all original content to wrapper
-                            const originalContent = Array.from(svg.children).filter(child => 
-                                child.tagName !== 'rect' || child.getAttribute('fill') !== options.background
-                            );
-                            originalContent.forEach(child => wrapper.appendChild(child));
-                            
-                            // Set transform on wrapper
-                            wrapper.setAttribute('transform', `translate(${translateX}, ${translateY}) scale(${scale})`);
-                            
-                            // Update viewBox to match new dimensions
-                            svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
-                            svg.appendChild(wrapper);
-                            
-                            // Optimize if requested
-                            if (options.optimize) {
-                                svg.removeAttribute('baseProfile');
-                                svg.removeAttribute('version');
-                                Array.from(svg.querySelectorAll('*')).forEach(el => {
-                                    if (el.getAttribute('fill') === 'none') el.removeAttribute('fill');
-                                    if (el.getAttribute('stroke') === 'none') el.removeAttribute('stroke');
-                                });
-                            }
-                            
-                            const svgContent = new XMLSerializer().serializeToString(svgDoc);
-                            zip.file(fileName, svgContent);
-                        } else {
-                            // For JSON files, convert Lottie animation to SVG
-                            const tempContainer = document.createElement('div');
-                            tempContainer.style.width = `${width}px`;
-                            tempContainer.style.height = `${height}px`;
-                            
-                            const anim = lottie.loadAnimation({
-                                container: tempContainer,
-                                renderer: 'svg',
-                                loop: false,
-                                autoplay: false,
-                                animationData: animData.modified,
-                                rendererSettings: {
-                                    preserveAspectRatio: 'xMidYMid meet',
-                                    clearCanvas: true,
+                    try {
+                        let jsonData;
+                        if (animData.type === 'json') {
+                            // For JSON files, use the modified data directly
+                            console.log(`Processing JSON file: ${fileName}`);
+                            jsonData = animData.modified;
+                        } else if (animData.type === 'svg') {
+                            // For SVG files, create a JSON structure
+                            console.log(`Converting SVG to JSON: ${fileName}`);
+                            jsonData = {
+                                type: "svg",
+                                version: "1.0",
+                                content: animData.modified,
+                                metadata: {
+                                    fileName: fileName,
+                                    originalFormat: "svg",
+                                    exportedAt: new Date().toISOString(),
+                                    colors: animData.colors
                                 }
-                            });
-                            
-                            await new Promise(resolve => {
-                                anim.addEventListener('DOMLoaded', () => {
-                                    const svg = tempContainer.querySelector('svg');
-                                    if (svg) {
-                                        svg.setAttribute('width', width);
-                                        svg.setAttribute('height', height);
-                                        svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
-                                        
-                                        if (options.background !== 'transparent') {
-                                            const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
-                                            rect.setAttribute('width', width);
-                                            rect.setAttribute('height', height);
-                                            rect.setAttribute('fill', options.background);
-                                            svg.insertBefore(rect, svg.firstChild);
-                                        }
-                                    }
-                                    resolve();
-                                });
-                            });
-                            
-                            const svgContent = tempContainer.innerHTML;
-                            const newFileName = fileName.replace('.json', '.svg');
-                            zip.file(newFileName, svgContent);
-                            
-                            anim.destroy();
+                            };
                         }
-                    } else if (type === 'json') {
-                        // Handle JSON export
-                        const content = options.format === 'pretty' 
-                            ? JSON.stringify(animData.modified, null, 2)
-                            : JSON.stringify(animData.modified);
-                        zip.file(fileName, content);
+
+                        if (!jsonData) {
+                            console.warn(`No valid data found for ${fileName}`);
+                            continue;
+                        }
+
+                        const content = format === 'pretty' 
+                            ? JSON.stringify(jsonData, null, 2)
+                            : JSON.stringify(jsonData);
+
+                        if (!content) {
+                            console.warn(`Failed to stringify data for ${fileName}`);
+                            continue;
+                        }
+
+                        // Create new filename with .json extension
+                        const newFileName = fileName.replace(/\.(json|svg)$/, '.json');
+                        zip.file(newFileName, content);
+                        hasFiles = true;
+                        console.log(`Successfully added ${newFileName} to zip`);
+                    } catch (fileError) {
+                        console.error(`Error processing file ${fileName}:`, fileError);
                     }
                 }
-                
+
+                if (!hasFiles) {
+                    throw new Error('No files were processed for export');
+                }
+
+                console.log('Generating zip file...');
                 const content = await zip.generateAsync({type: "blob"});
+                
+                if (!content || content.size === 0) {
+                    throw new Error('Generated zip file is empty');
+                }
+
+                console.log(`Zip file generated, size: ${content.size} bytes`);
                 const url = URL.createObjectURL(content);
                 const a = document.createElement('a');
                 a.href = url;
-                a.download = `export_${type}_${new Date().getTime()}.zip`;
+                a.download = `export_json_${new Date().getTime()}.zip`;
                 document.body.appendChild(a);
                 a.click();
                 document.body.removeChild(a);
                 URL.revokeObjectURL(url);
-                
+                console.log('Export completed successfully');
+
             } catch (error) {
-                console.error(`Error exporting ${type} files:`, error);
-                alert(`Error exporting ${type} files. Please try again.`);
+                console.error('Detailed error exporting JSON files:', error);
+                alert(`Error exporting JSON files: ${error.message}`);
             }
         };
     } else if (type === 'png' || type === 'jpg') {
@@ -2231,3 +2094,173 @@ async function exportAsImage(svgString, options) {
     
     return imageBlob;
 } 
+
+// Add these functions at the top of your script
+function saveToLocalStorage() {
+    const animationsData = Array.from(animations.entries()).map(([fileName, data]) => {
+        return {
+            fileName,
+            data: {
+                original: data.original,
+                modified: data.modified,
+                colors: Array.from(data.colors),
+                type: data.type
+            }
+        };
+    });
+    
+    try {
+        localStorage.setItem('savedAnimations', JSON.stringify(animationsData));
+        console.log('Animations saved to local storage');
+    } catch (error) {
+        console.error('Error saving to local storage:', error);
+        // If storage is full, try to clear old data
+        if (error.name === 'QuotaExceededError') {
+            localStorage.clear();
+            try {
+                localStorage.setItem('savedAnimations', JSON.stringify(animationsData));
+            } catch (retryError) {
+                console.error('Failed to save even after clearing storage:', retryError);
+            }
+        }
+    }
+}
+
+function loadFromLocalStorage() {
+    try {
+        const savedData = localStorage.getItem('savedAnimations');
+        if (savedData) {
+            const animationsData = JSON.parse(savedData);
+            animationsData.forEach(({fileName, data}) => {
+                animations.set(fileName, {
+                    original: data.original,
+                    modified: data.modified,
+                    colors: new Set(data.colors),
+                    type: data.type
+                });
+            });
+            console.log('Animations loaded from local storage');
+            return true;
+        }
+    } catch (error) {
+        console.error('Error loading from local storage:', error);
+    }
+    return false;
+}
+
+// Add this to your initialization code (at the end of your script)
+document.addEventListener('DOMContentLoaded', () => {
+    // Load saved animations
+    if (loadFromLocalStorage()) {
+        // Recreate the file list UI for loaded animations
+        const filesList = document.getElementById('filesList');
+        filesList.className = 'mt-4 space-y-2 max-h-[300px] overflow-y-auto modern-scroll';
+        
+        animations.forEach((data, currentFileName) => {
+            // Create file item
+            const fileItem = document.createElement('div');
+            fileItem.className = 'file-item flex items-center justify-between p-3 bg-gray-50 rounded-lg transition-colors cursor-pointer';
+            
+            // Create file name container
+            const fileNameContainer = document.createElement('div');
+            fileNameContainer.className = 'flex items-center gap-2 flex-1 min-w-0';
+            
+            // Create thumbnail container
+            const thumbnailContainer = document.createElement('div');
+            thumbnailContainer.className = 'file-thumbnail flex items-center justify-center';
+            
+            // Create thumbnail
+            const thumbnail = document.createElement('div');
+            thumbnail.style.cssText = 'width: 100%; height: 100%; display: flex; align-items: center; justify-center;';
+            
+            if (data.type === 'svg') {
+                thumbnail.innerHTML = data.modified;
+            } else {
+                const tempContainer = document.createElement('div');
+                tempContainer.style.cssText = 'width: 100%; height: 100%; position: relative;';
+                thumbnail.appendChild(tempContainer);
+
+                const anim = lottie.loadAnimation({
+                    container: tempContainer,
+                    renderer: 'svg',
+                    loop: false,
+                    autoplay: false,
+                    animationData: data.modified,
+                    rendererSettings: {
+                        preserveAspectRatio: 'xMidYMid meet',
+                        clearCanvas: true,
+                    }
+                });
+
+                anim.goToAndStop(0, true);
+            }
+            
+            thumbnailContainer.appendChild(thumbnail);
+            
+            const fileNameSpan = document.createElement('span');
+            fileNameSpan.textContent = currentFileName;
+            fileNameSpan.className = 'text-sm text-gray-700 truncate';
+            
+            fileNameContainer.appendChild(thumbnailContainer);
+            fileNameContainer.appendChild(fileNameSpan);
+            
+            // Create delete button
+            const deleteBtn = document.createElement('button');
+            deleteBtn.className = 'p-1 hover:bg-gray-200 rounded-full transition-colors ml-2';
+            const deleteIcon = document.createElement('i');
+            deleteIcon.setAttribute('data-lucide', 'x');
+            deleteIcon.className = 'w-4 h-4 text-gray-500';
+            deleteBtn.appendChild(deleteIcon);
+            deleteBtn.title = 'Delete file';
+            deleteBtn.onclick = (e) => {
+                e.stopPropagation();
+                deleteFile(currentFileName);
+                refreshGlobalColors();
+            };
+            
+            // Add click handler to the entire file item
+            fileItem.onclick = () => {
+                document.querySelectorAll('#filesList > div').forEach(item => {
+                    item.classList.remove('selected');
+                    item.classList.add('bg-gray-50');
+                });
+                fileItem.classList.remove('bg-gray-50');
+                fileItem.classList.add('selected');
+                activeFileName = currentFileName;
+                loadAnimation(currentFileName);
+            };
+            
+            fileItem.appendChild(fileNameContainer);
+            fileItem.appendChild(deleteBtn);
+            filesList.appendChild(fileItem);
+        });
+
+        // Initialize Lucide icons
+        lucide.createIcons();
+        
+        // Create export buttons if needed
+        if (animations.size > 0 && !document.querySelector('header .export-buttons')) {
+            createExportButtons();
+        }
+
+        // Create or refresh global color editor
+        if (!document.getElementById('globalColors')) {
+            createGlobalColorEditor();
+        } else {
+            refreshGlobalColors();
+        }
+
+        // Load the first file automatically
+        if (animations.size > 0) {
+            const firstFileName = animations.keys().next().value;
+            const firstFileItem = filesList.firstElementChild;
+            if (firstFileItem && firstFileName) {
+                firstFileItem.classList.remove('bg-gray-50');
+                firstFileItem.classList.add('selected');
+                activeFileName = firstFileName;
+                currentFileName = firstFileName;
+                loadAnimation(firstFileName);
+            }
+        }
+    }
+});
